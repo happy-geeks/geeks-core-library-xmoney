@@ -5,11 +5,14 @@ namespace GeeksCoreLibrary.Modules.Payments.XMoney.Models;
 public class OrderModel
 {
     [JsonPropertyName("reference")]
-    public string Reference { get; set; }
+    public string? Reference { get; set; }
+
     [JsonPropertyName("amount")]
-    public AmountModel Amount { get; set; }
+    public AmountModel Amount { get; set; } = new();
+
     [JsonPropertyName("return_urls")]
-    public ReturnUrlsModel ReturnUrls { get; set; }
+    public ReturnUrlsModel ReturnUrls { get; set; } = new();
+
     [JsonPropertyName("line_items")]
-    public List<LineItemModel> LineItems { get; set; }
+    public List<LineItemModel> LineItems { get; set; } = [];
 }

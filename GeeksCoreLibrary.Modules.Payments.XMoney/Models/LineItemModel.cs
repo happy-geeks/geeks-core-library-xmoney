@@ -5,13 +5,17 @@ namespace GeeksCoreLibrary.Modules.Payments.XMoney.Models;
 public class LineItemModel
 {
     [JsonPropertyName("sku")]
-    public string Sku { get; set; }
+    public string? Sku { get; set; }
+
     [JsonPropertyName("name")]
-    public string Name { get; set; }
+    public string? Name { get; set; }
+
     [JsonPropertyName("price")]
-    public string Price { get; set; }
+    public string? Price { get; set; }
+
     [JsonPropertyName("currency")]
-    public string Currency { get; set; }
+    public string? Currency { get; set; }
+
     [JsonPropertyName("quantity")]
     public int Quantity { get; set; }
 }

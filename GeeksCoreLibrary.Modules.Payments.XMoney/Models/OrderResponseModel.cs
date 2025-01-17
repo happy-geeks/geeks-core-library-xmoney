@@ -7,6 +7,5 @@ public class OrderResponseModel
 {
     [JsonPropertyName("data")]
     [JsonProperty("data")]
-    public OrderResponseDataModel Data { get; set; }
-
+    public OrderResponseDataModel Data { get; set; } = new();
 }

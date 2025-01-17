@@ -5,5 +5,5 @@ namespace GeeksCoreLibrary.Modules.Payments.XMoney.Models;
 public class OrderRequestModel
 {
     [JsonPropertyName("data")]
-    public DataModel Data { get; set; }
+    public DataModel Data { get; set; } = new();
 }

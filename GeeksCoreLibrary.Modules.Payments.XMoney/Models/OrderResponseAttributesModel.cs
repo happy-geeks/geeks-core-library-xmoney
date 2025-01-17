@@ -7,5 +7,5 @@ public class OrderResponseAttributesModel
 {
     [JsonPropertyName("redirect_url")]
     [JsonProperty("redirect_url")]
-    public string RedirectUrl { get; set; }
+    public string? RedirectUrl { get; set; }
 }

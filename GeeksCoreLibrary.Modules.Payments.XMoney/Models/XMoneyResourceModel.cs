@@ -7,11 +7,13 @@ public class XMoneyResourceModel
 {
     [JsonPropertyName("reference")]
     [JsonProperty("reference")]
-    public string Reference { get; set; }
+    public string? Reference { get; set; }
+
     [JsonPropertyName("amount")]
     [JsonProperty("amount")]
-    public string Amount { get; set; }
+    public string? Amount { get; set; }
+
     [JsonPropertyName("currency")]
     [JsonProperty("currency")]
-    public string Currency { get; set; }
+    public string? Currency { get; set; }
 }
