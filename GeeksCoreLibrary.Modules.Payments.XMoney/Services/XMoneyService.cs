@@ -34,34 +34,27 @@ public class XMoneyService(
     IShoppingBasketsService shoppingBasketsService,
     IWiserItemsService wiserItemsService,
     IHttpContextAccessor? httpContextAccessor = null)
-    : PaymentServiceProviderBaseService(databaseHelpersService, databaseConnection, logger, httpContextAccessor), IPaymentServiceProviderService, IScopedService
+    : PaymentServiceProviderBaseService(databaseHelpersService, databaseConnection, logger, httpContextAccessor),
+        IPaymentServiceProviderService, IScopedService
 {
     private readonly IDatabaseConnection databaseConnection = databaseConnection;
     private readonly ILogger<PaymentServiceProviderBaseService> logger = logger;
     private readonly IHttpContextAccessor? httpContextAccessor = httpContextAccessor;
     private readonly GclSettings gclSettings = gclSettings.Value;
 
-    private string? webHookContents;
-    private XMoneyWebhookModel? webhookData;
-    private string? webhookSecret;
-    private string? baseUrl;
-
     private readonly JsonSerializerSettings? jsonSerializerSettings = new()
     {
         NullValueHandling = NullValueHandling.Ignore
     };
 
+
     /// <inheritdoc />
-    public async Task<PaymentRequestResult> HandlePaymentRequestAsync(
-        ICollection<(WiserItemModel Main, List<WiserItemModel> Lines)> conceptOrders,
-        WiserItemModel userDetails,
-        PaymentMethodSettingsModel paymentMethodSettings,
-        string invoiceNumber)
+    public async Task<PaymentRequestResult> HandlePaymentRequestAsync(ICollection<(WiserItemModel Main, List<WiserItemModel> Lines)> conceptOrders, WiserItemModel userDetails, PaymentMethodSettingsModel paymentMethodSettings, string invoiceNumber)
     {
         var failUrl = "";
         try
         {
-            var xMoneySettings = (XMoneySettingsModel) paymentMethodSettings.PaymentServiceProvider;
+            var xMoneySettings = (XMoneySettingsModel)paymentMethodSettings.PaymentServiceProvider;
             var validationResult = ValidatePayPalSettings(xMoneySettings);
             failUrl = xMoneySettings.FailUrl;
             if (!validationResult.Valid)
@@ -74,13 +67,10 @@ public class XMoneyService(
                     ActionData = failUrl
                 };
             }
-
+        
             // Build and execute payment request.
-            baseUrl = gclSettings.Environment.InList(Environments.Development, Environments.Test) ? "https://merchants.api.sandbox.crypto.xmoney.com" : "https://merchants.api.crypto.xmoney.com";
-            var restClient = CreateRestClient(baseUrl);
+            var restClient = CreateRestClient();
             var restRequest = await CreateRestRequestAsync(xMoneySettings, invoiceNumber, conceptOrders);
-            restRequest.AddHeader("Authorization", $"Bearer {xMoneySettings.ApiKey}");
-            restRequest.AddHeader("Content-Type", "application/json");
             var restResponse = await restClient.ExecuteAsync(restRequest);
             if (restResponse.Content == null)
             {
@@ -92,7 +82,6 @@ public class XMoneyService(
                     ActionData = failUrl
                 };
             }
-
             var xMoneyResponse = JsonConvert.DeserializeObject<OrderResponseModel>(restResponse.Content, jsonSerializerSettings);
             var responseSuccessful = restResponse.StatusCode == HttpStatusCode.Created;
             if (xMoneyResponse == null)
@@ -105,19 +94,19 @@ public class XMoneyService(
                     ActionData = failUrl
                 };
             }
-
+            
             foreach (var conceptOrder in conceptOrders)
             {
                 conceptOrder.Main.SetDetail(OrderProcessConstants.PaymentProviderTransactionId, xMoneyResponse.Data.Id);
                 await wiserItemsService.SaveAsync(conceptOrder.Main, skipPermissionsCheck: true);
             }
-
+            
             return new PaymentRequestResult
             {
                 Successful = responseSuccessful,
                 Action = PaymentRequestActions.Redirect,
                 ErrorMessage = "No response received from PayPal.",
-                ActionData = responseSuccessful ? xMoneyResponse.Data.Attributes.RedirectUrl : xMoneySettings.FailUrl
+                ActionData = (responseSuccessful) ? xMoneyResponse.Data.Attributes.RedirectUrl : xMoneySettings.FailUrl
             };
         }
         catch (Exception exception)
@@ -136,8 +125,11 @@ public class XMoneyService(
     /// <inheritdoc />
     public async Task<StatusUpdateResult> ProcessStatusUpdateAsync(OrderProcessSettingsModel orderProcessSettings, PaymentMethodSettingsModel paymentMethodSettings)
     {
-        var error = "";
+        var error = String.Empty;
         var statusCode = 0;
+        var webHookResponseBody = String.Empty;
+        var xMoneySettings = (XMoneySettingsModel)paymentMethodSettings.PaymentServiceProvider;
+        XMoneyWebhookModel? model = null;
         try
         {
             if (httpContextAccessor?.HttpContext == null)
@@ -147,48 +139,13 @@ public class XMoneyService(
                 {
                     Successful = false,
                     Status = error,
-                    StatusCode = statusCode
+                    StatusCode = 0
                 };
             }
-
-            if (webhookData == null)
-            {
-                error = "No webhook data found.";
-                return new StatusUpdateResult
-                {
-                    Successful = false,
-                    Status = error,
-                    StatusCode = statusCode
-                };
-            }
-
-            if (String.IsNullOrWhiteSpace(webHookContents))
-            {
-                error = "No webhook contents found.";
-                return new StatusUpdateResult
-                {
-                    Successful = false,
-                    Status = error,
-                    StatusCode = statusCode
-                };
-            }
-
-            if (String.IsNullOrWhiteSpace(webhookSecret))
-            {
-                error = "No webhook secret found.";
-                return new StatusUpdateResult
-                {
-                    Successful = false,
-                    Status = error,
-                    StatusCode = statusCode
-                };
-            }
-
-            var jsonObject = JObject.Parse(webHookContents);
-            var signatureString = GenerateStringForSignature(jsonObject);
-            var ourSignature = GenerateSignature(webhookSecret, signatureString);
-
-            switch (webhookData.State)
+            
+            (model, webHookResponseBody) = await GetXMoneyWebhookModelAsync(true, xMoneySettings);
+            
+            switch (model.State)
             {
                 case "completed":
                 case "received":
@@ -197,6 +154,7 @@ public class XMoneyService(
                     break;
                 default:
                     error = "State is not completed, received or detected.";
+                    statusCode = model.StatusCode;
                     return new StatusUpdateResult
                     {
                         Successful = false,
@@ -204,24 +162,10 @@ public class XMoneyService(
                         StatusCode = statusCode
                     };
             }
-
-            statusCode = webhookData.StatusCode;
-            var successFul = webhookData.Signature == ourSignature;
-
-            if (!successFul)
-            {
-                error = "The signature we have does not align with the signature found in the webhook data.";
-                return new StatusUpdateResult
-                {
-                    Successful = false,
-                    Status = error,
-                    StatusCode = statusCode
-                };
-            }
-
+            
             return new StatusUpdateResult
             {
-                Successful = successFul,
+                Successful = true,
                 Status = "SUCCESS"
             };
         }
@@ -239,8 +183,7 @@ public class XMoneyService(
         }
         finally
         {
-            var invoiceNumber = webhookData?.Resource.Reference;
-            await LogIncomingPaymentActionAsync(PaymentServiceProviders.XMoney, invoiceNumber, statusCode, responseBody: webHookContents, error: error);
+            await LogIncomingPaymentActionAsync(PaymentServiceProviders.XMoney, model?.Resource.Reference, statusCode, responseBody: webHookResponseBody, error: error);
         }
     }
 
@@ -248,22 +191,23 @@ public class XMoneyService(
     public async Task<PaymentServiceProviderSettingsModel> GetProviderSettingsAsync(PaymentServiceProviderSettingsModel paymentServiceProviderSettings)
     {
         databaseConnection.AddParameter("id", paymentServiceProviderSettings.Id);
-        var query = $@"SELECT
-        xMoneyApiKeyLive.`value` AS xMoneyApiKeyLive,
-        xMoneyApiKeyTest.`value` AS xMoneyApiKeyTest,
-        xMoneyNotifyUrlLive.`value` AS xMoneyNotifyUrlLive,
-        xMoneyNotifyUrlTest.`value` AS xMoneyNotifyUrlTest,
-        xMoneyWebhookSecretLive.`value` AS xMoneyWebhookSecretLive,
-        xMoneyWebhookSecretTest.`value` AS xMoneyWebhookSecretTest
-        FROM {WiserTableNames.WiserItem} AS paymentServiceProvider
-        LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyApiKeyLive ON xMoneyApiKeyLive.item_id = paymentServiceProvider.id AND xMoneyApiKeyLive.`key` = '{ConstantsModel.XMoneyApiKeyLive}'
-        LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyApiKeyTest ON xMoneyApiKeyTest.item_id = paymentServiceProvider.id AND xMoneyApiKeyTest.`key` = '{ConstantsModel.XMoneyApiKeyTest}'
-        LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyNotifyUrlLive ON xMoneyNotifyUrlLive.item_id = paymentServiceProvider.id AND xMoneyNotifyUrlLive.`key` = '{ConstantsModel.XMoneyNotifyUrlLive}'
-        LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyNotifyUrlTest ON xMoneyNotifyUrlTest.item_id = paymentServiceProvider.id AND xMoneyNotifyUrlTest.`key` = '{ConstantsModel.XMoneyNotifyUrlTest}'
-        LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyWebhookSecretLive ON xMoneyWebhookSecretLive.item_id = paymentServiceProvider.id AND xMoneyWebhookSecretLive.`key` = '{ConstantsModel.XMoneyWebhookSecretLive}'
-        LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyWebhookSecretTest ON xMoneyWebhookSecretTest.item_id = paymentServiceProvider.id AND xMoneyWebhookSecretTest.`key` = '{ConstantsModel.XMoneyWebhookSecretTest}'
-        WHERE paymentServiceProvider.id = ?id";
-
+        const string query = $"""
+                              SELECT xMoneyApiKeyLive.`value` AS xMoneyApiKeyLive,
+                                     xMoneyApiKeyTest.`value` AS xMoneyApiKeyTest,
+                                     xMoneyNotifyUrlLive.`value` AS xMoneyNotifyUrlLive,
+                                     xMoneyNotifyUrlTest.`value` AS xMoneyNotifyUrlTest,
+                                     xMoneyWebhookSecretLive.`value` AS xMoneyWebhookSecretLive,
+                                     xMoneyWebhookSecretTest.`value` AS xMoneyWebhookSecretTest
+                              FROM {WiserTableNames.WiserItem} AS paymentServiceProvider
+                              LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyApiKeyLive ON xMoneyApiKeyLive.item_id = paymentServiceProvider.id AND xMoneyApiKeyLive.`key` = '{ConstantsModel.XMoneyApiKeyLive}'
+                              LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyApiKeyTest ON xMoneyApiKeyTest.item_id = paymentServiceProvider.id AND xMoneyApiKeyTest.`key` = '{ConstantsModel.XMoneyApiKeyTest}'
+                              LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyNotifyUrlLive ON xMoneyNotifyUrlLive.item_id = paymentServiceProvider.id AND xMoneyNotifyUrlLive.`key` = '{ConstantsModel.XMoneyNotifyUrlLive}'
+                              LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyNotifyUrlTest ON xMoneyNotifyUrlTest.item_id = paymentServiceProvider.id AND xMoneyNotifyUrlTest.`key` = '{ConstantsModel.XMoneyNotifyUrlTest}'
+                              LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyWebhookSecretLive ON xMoneyWebhookSecretLive.item_id = paymentServiceProvider.id AND xMoneyWebhookSecretLive.`key` = '{ConstantsModel.xMoneyWebhookSecretLive}'
+                              LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyWebhookSecretTest ON xMoneyWebhookSecretTest.item_id = paymentServiceProvider.id AND xMoneyWebhookSecretTest.`key` = '{ConstantsModel.xMoneyWebhookSecretTest}'
+                              WHERE paymentServiceProvider.id = ?id
+                              """;
+        
         try
         {
             var result = new XMoneySettingsModel
@@ -281,13 +225,11 @@ public class XMoneyService(
             {
                 return result;
             }
-
             var row = dataTable.Rows[0];
 
             var suffix = gclSettings.Environment.InList(Environments.Development, Environments.Test) ? "Test" : "Live";
             result.ApiKey = row.GetAndDecryptSecretKey($"xMoneyApiKey{suffix}");
             result.WebhookSecret = row.GetAndDecryptSecretKey($"xMoneyWebhookSecret{suffix}");
-            webhookSecret = result.WebhookSecret;
             result.CallbackUrl = row.GetAndDecryptSecretKey($"xMoneyNotifyUrl{suffix}");
             return result;
         }
@@ -297,37 +239,59 @@ public class XMoneyService(
             throw;
         }
     }
+    
+    private async Task<(XMoneyWebhookModel Model, string webHookResponseBody)> GetXMoneyWebhookModelAsync(bool verifySignature, XMoneySettingsModel? xMoneySettings = null)
+    {
+        using StreamReader reader = new(httpContextAccessor.HttpContext!.Request.Body);
+        var webHookContents = await reader.ReadToEndAsync();
+
+        if (String.IsNullOrWhiteSpace(webHookContents))
+        {
+            throw new Exception("No JSON found in body of XMoney webhook.");
+        }
+        
+        JObject jObject = JObject.Parse(webHookContents);
+
+        if (verifySignature)
+        {
+            if (xMoneySettings is null)
+            {
+                throw new ArgumentNullException(nameof(xMoneySettings), "xMoneySettings cannot be null. If verifySignature is true");
+            }
+            
+            if (!VerifySignature(jObject, xMoneySettings))
+            {
+                throw new Exception("Signature verification failed.");
+            }
+        }
+        
+        var webhookData = jObject.ToObject<XMoneyWebhookModel>();
+        if (webhookData == null)
+        {
+            throw new Exception("Invalid JSON found in body of XMoney webhook.");
+        }
+        
+        return (webhookData, webHookContents);
+    }
 
     /// <inheritdoc />
     public async Task<string> GetInvoiceNumberFromRequestAsync()
     {
         try
         {
-            if (httpContextAccessor?.HttpContext?.Request.Body == null)
+            if (httpContextAccessor.HttpContext?.Request.Body == null)
             {
                 throw new Exception("No HTTP context available.");
             }
 
-            using StreamReader reader = new(httpContextAccessor.HttpContext.Request.Body);
-            webHookContents = await reader.ReadToEndAsync();
-            if (String.IsNullOrWhiteSpace(webHookContents))
-            {
-                throw new Exception("No JSON found in body of PayPal webhook.");
-            }
-
-            webhookData = JsonConvert.DeserializeObject<XMoneyWebhookModel>(webHookContents, jsonSerializerSettings);
-            if (webhookData == null)
-            {
-                throw new Exception("Invalid JSON found in body of PayPal webhook.");
-            }
-
-            webhookData.StatusCode = httpContextAccessor.HttpContext.Response.StatusCode;
-            var invoiceId = webhookData.Resource.Reference;
+            var webhookModel = await GetXMoneyWebhookModelAsync(false);
+            
+            webhookModel.Model.StatusCode = httpContextAccessor.HttpContext.Response.StatusCode;
+            var invoiceId = webhookModel.Model.Resource.Reference;
             if (String.IsNullOrEmpty(invoiceId))
             {
                 throw new Exception("No invoice id found in body of PayPal webhook.");
             }
-
             return invoiceId;
         }
         catch (Exception exception)
@@ -337,21 +301,22 @@ public class XMoneyService(
         }
     }
 
-    private static RestClient CreateRestClient(string baseUrl)
+    private RestClient CreateRestClient()
     {
+        var baseUrl = gclSettings.Environment.InList(Environments.Development, Environments.Test) ?  "https://merchants.api.sandbox.crypto.xmoney.com" : "https://merchants.api.crypto.xmoney.com";
         return new RestClient(new RestClientOptions(baseUrl));
     }
-
-    private (bool Valid, string Message) ValidatePayPalSettings(XMoneySettingsModel xMoneySettings)
+    
+    private (bool Valid, string? Message) ValidatePayPalSettings(XMoneySettingsModel xMoneySettings)
     {
         if (String.IsNullOrEmpty(xMoneySettings.ApiKey) || String.IsNullOrEmpty(xMoneySettings.CallbackUrl))
         {
             return (false, "xMoney misconfigured: No api key or callback url.");
         }
 
-        return (true, String.Empty);
+        return (true, null);
     }
-
+    
     private async Task<RestRequest> CreateRestRequestAsync(XMoneySettingsModel xMoneySettings, string invoiceNumber, ICollection<(WiserItemModel Main, List<WiserItemModel> Lines)> conceptOrders)
     {
         var basketSettings = await shoppingBasketsService.GetSettingsAsync();
@@ -362,61 +327,64 @@ public class XMoneyService(
         var tax = await shoppingBasketsService.GetPriceAsync(conceptOrders.FirstOrDefault().Main, conceptOrders.FirstOrDefault().Lines, basketSettings, ShoppingBasket.PriceTypes.VatOnly);
         var discount = await shoppingBasketsService.GetPriceAsync(conceptOrders.FirstOrDefault().Main, conceptOrders.FirstOrDefault().Lines, basketSettings, ShoppingBasket.PriceTypes.DiscountInVat);
         var hasShippingAddress = !String.IsNullOrWhiteSpace(conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.ShippingPostalCode));
-
+        
         var restRequest = new RestRequest("/api/stores/orders", Method.Post);
+        restRequest.AddHeader("Authorization", $"Bearer {xMoneySettings.ApiKey}");
+        restRequest.AddHeader("Content-Type", "application/json");
         var xMoneyCreateOrderRequest = new OrderRequestModel
         {
             Data = new DataModel
             {
-                Type = "orders",
-                Attributes = new AttributesModel
-                {
-                    Order = new OrderModel
-                    {
-                        Reference = invoiceNumber,
-                        Amount = new AmountModel
-                        {
-                            Total = Math.Round(totalPrice, 2).ToString("0.##").Replace(",", ".").Replace(".", "."),
-                            Currency = xMoneySettings.Currency,
-                            Details = new DetailsModel
-                            {
-                                Subtotal = Math.Round(subTotaal, 2).ToString("0.##").Replace(",", ".").Replace(".", "."),
-                                Tax = Math.Round(tax, 2).ToString("0.##").Replace(",", ".").Replace(".", "."),
-                                Discount = Math.Round(discount, 2).ToString("0.##").Replace(",", ".").Replace(".", ".")
-                            }
-                        },
-                        ReturnUrls = new ReturnUrlsModel
-                        {
-                            ReturnUrl = xMoneySettings.SuccessUrl,
-                            CancelUrl = xMoneySettings.FailUrl,
-                            CallbackUrl = xMoneySettings.CallbackUrl
-                        },
-                        LineItems = []
-                    },
-                    Customer = new CustomerModel
-                    {
-                        Name = $"{conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.GivenName)} {conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.Surname)}",
-                        FirstName = conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.GivenName),
-                        LastName = conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.Surname),
-                        Email = conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.EmailAddress),
-                        BillingAddress = $"{conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(hasShippingAddress ? ConstantsModel.ShippingStreet : ConstantsModel.Street)} {conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(hasShippingAddress ? ConstantsModel.ShippingHouseNumber : ConstantsModel.HouseNumber)}",
-                        Address1 = $"{conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.Street)} {conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.HouseNumber)}{conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.HouseNumberSuffix)}",
-                        Address2 = $"{conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.ShippingStreet)} {conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.ShippingHouseNumber)}{conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.ShippingHouseNumberSuffix)}",
-                        City = conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.City),
-                        PostCode = conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.PostalCode),
-                        Country = conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.Country).ToUpper()
-                    }
-                }
+                 Type = "orders",
+                 Attributes = new AttributesModel
+                 {
+                     Order = new OrderModel
+                     {
+                         Reference = invoiceNumber,
+                         Amount = new AmountModel
+                         {
+                             Total = Math.Round(totalPrice, 2).ToString("0.##").Replace(",", ".").Replace(".", "."),
+                             Currency = xMoneySettings.Currency,
+                             Details = new DetailsModel
+                             {
+                                 Subtotal = Math.Round(subTotaal, 2).ToString("0.##").Replace(",", ".").Replace(".", "."),
+                                 Tax = Math.Round(tax, 2).ToString("0.##").Replace(",", ".").Replace(".", "."),
+                                 Discount = Math.Round(discount, 2).ToString("0.##").Replace(",", ".").Replace(".", ".")
+                             }
+                         },
+                         ReturnUrls = new ReturnUrlsModel
+                         {
+                             
+                             ReturnUrl = xMoneySettings.SuccessUrl,
+                             CancelUrl = xMoneySettings.FailUrl,
+                             CallbackUrl = xMoneySettings.CallbackUrl
+                         },
+                         LineItems = new List<LineItemModel>()
+                     },
+                     Customer = new CustomerModel
+                     {
+                         Name = $"{conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.GivenName)} {conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.Surname)}",
+                         FirstName = conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.GivenName),
+                         LastName = conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.Surname),
+                         Email = conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.EmailAddress),
+                         BillingAddress = $"{conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(hasShippingAddress ? ConstantsModel.ShippingStreet : ConstantsModel.Street)} {conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(hasShippingAddress ? ConstantsModel.ShippingHouseNumber : ConstantsModel.HouseNumber)}",
+                         Address1 = $"{conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.Street)} {conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.HouseNumber)}{conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.HouseNumberSuffix)}",
+                         Address2 = $"{conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.ShippingStreet)} {conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.ShippingHouseNumber)}{conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.ShippingHouseNumberSuffix)}",
+                         City = conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.City),
+                         PostCode = conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.PostalCode),
+                         Country = conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.Country).ToUpper(),
+                     }
+                 }
             }
         };
-
+        
         foreach (var conceptOrder in conceptOrders)
         {
             foreach (var orderLine in conceptOrder.Lines)
             {
                 var price = await shoppingBasketsService.GetLinePriceAsync(conceptOrder.Main, orderLine, basketSettings, ShoppingBasket.PriceTypes.ExVatExDiscount, true);
                 var quantity = orderLine.GetDetailValue<int>(ConstantsModel.Quantity);
-
+                
                 var lineItems = new LineItemModel
                 {
                     Name = orderLine.GetDetailValue<string>(ConstantsModel.Title),
@@ -427,12 +395,26 @@ public class XMoneyService(
                 xMoneyCreateOrderRequest.Data.Attributes.Order.LineItems.Add(lineItems);
             }
         }
-
         restRequest.AddJsonBody(xMoneyCreateOrderRequest);
-
+        
         return restRequest;
     }
 
+    private bool VerifySignature(JObject jsonObject, XMoneySettingsModel xMoneySettings)
+    {
+        var signatureContent = GenerateStringForSignature(jsonObject);
+        var signature = GenerateSignature(xMoneySettings.WebhookSecret, signatureContent);
+        
+        var requestSignature = jsonObject["signature"];
+
+        if (requestSignature is null)
+        {
+            throw new Exception("No signature found");
+        }
+
+        return signature == requestSignature.ToString();
+    }
+    
     private string GenerateStringForSignature(JObject jsonObject, string keyPrefix = "")
     {
         var result = new StringBuilder();
@@ -445,38 +427,30 @@ public class XMoneyService(
 
             if (jsonProperty.Value.Type == JTokenType.Object)
             {
-                result.Append(GenerateStringForSignature((JObject) jsonProperty.Value, $"{keyPrefix}{jsonProperty.Name}"));
+                result.Append(GenerateStringForSignature((JObject)jsonProperty.Value, $"{keyPrefix}{jsonProperty.Name}"));
             }
             else
             {
                 result.Append($"{keyPrefix}{jsonProperty.Name}{jsonProperty.Value.ToString()}");
             }
         }
-
         return result.ToString();
     }
-
+    
     private static string GenerateSignature(string webhookSecret, string content, bool asBase64String = false)
     {
-        var secret = webhookSecret;
-        if (String.IsNullOrWhiteSpace(secret))
-        {
+        if (String.IsNullOrWhiteSpace(webhookSecret))
             throw new Exception("No XMoney secret key found in Wiser settings!");
-        }
 
-        using HMACSHA256 hmac = new(Encoding.UTF8.GetBytes(secret));
+        using HMACSHA256 hmac = new HMACSHA256(Encoding.UTF8.GetBytes(webhookSecret));
         var hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(content));
 
         if (asBase64String)
-        {
             return Convert.ToBase64String(hashBytes);
-        }
 
-        StringBuilder hashString = new();
+        StringBuilder hashString = new StringBuilder();
         for (var index = 0; index <= hashBytes.Length - 1; index++)
-        {
             hashString.Append(hashBytes[index].ToString("x2"));
-        }
 
         return hashString.ToString();
     }
