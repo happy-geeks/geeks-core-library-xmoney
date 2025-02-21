@@ -6,13 +6,13 @@
         <Nullable>enable</Nullable>
         <Authors>Happy Horizon B.V.</Authors>
         <Description>xMoney plugin for the order process of the GeeksCoreLibrary.</Description>
-        <AssemblyVersion>1.0.0.0</AssemblyVersion>
-        <FileVersion>1.0.0.0</FileVersion>
+        <AssemblyVersion>5.1.2502.1</AssemblyVersion>
+        <FileVersion>5.1.2502.1</FileVersion>
+        <Version>5.1.2502.1</Version>
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="GeeksCoreLibrary" Version="5.0.2501.1"/>
+      <PackageReference Include="GeeksCoreLibrary" Version="5.1.2502.1" />
     </ItemGroup>
-
 
 </Project>
