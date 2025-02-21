@@ -205,8 +205,8 @@ public class XMoneyService(
                               LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyApiKeyTest ON xMoneyApiKeyTest.item_id = paymentServiceProvider.id AND xMoneyApiKeyTest.`key` = '{ConstantsModel.XMoneyApiKeyTest}'
                               LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyNotifyUrlLive ON xMoneyNotifyUrlLive.item_id = paymentServiceProvider.id AND xMoneyNotifyUrlLive.`key` = '{ConstantsModel.XMoneyNotifyUrlLive}'
                               LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyNotifyUrlTest ON xMoneyNotifyUrlTest.item_id = paymentServiceProvider.id AND xMoneyNotifyUrlTest.`key` = '{ConstantsModel.XMoneyNotifyUrlTest}'
-                              LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyWebhookSecretLive ON xMoneyWebhookSecretLive.item_id = paymentServiceProvider.id AND xMoneyWebhookSecretLive.`key` = '{ConstantsModel.xMoneyWebhookSecretLive}'
-                              LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyWebhookSecretTest ON xMoneyWebhookSecretTest.item_id = paymentServiceProvider.id AND xMoneyWebhookSecretTest.`key` = '{ConstantsModel.xMoneyWebhookSecretTest}'
+                              LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyWebhookSecretLive ON xMoneyWebhookSecretLive.item_id = paymentServiceProvider.id AND xMoneyWebhookSecretLive.`key` = '{ConstantsModel.XMoneyWebhookSecretLive}'
+                              LEFT JOIN {WiserTableNames.WiserItemDetail} AS xMoneyWebhookSecretTest ON xMoneyWebhookSecretTest.item_id = paymentServiceProvider.id AND xMoneyWebhookSecretTest.`key` = '{ConstantsModel.XMoneyWebhookSecretTest}'
                               WHERE paymentServiceProvider.id = ?id
                               """;
         
