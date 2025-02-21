@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.Globalization;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using GeeksCoreLibrary.Components.OrderProcess.Models;
@@ -41,6 +42,8 @@ public class XMoneyService(
     private readonly ILogger<PaymentServiceProviderBaseService> logger = logger;
     private readonly IHttpContextAccessor? httpContextAccessor = httpContextAccessor;
     private readonly GclSettings gclSettings = gclSettings.Value;
+    
+    private string? webHookContents;
 
     private readonly JsonSerializerSettings? jsonSerializerSettings = new()
     {
@@ -55,11 +58,11 @@ public class XMoneyService(
         try
         {
             var xMoneySettings = (XMoneySettingsModel)paymentMethodSettings.PaymentServiceProvider;
-            var validationResult = ValidatePayPalSettings(xMoneySettings);
+            var validationResult = ValidateXMoneySettings(xMoneySettings);
             failUrl = xMoneySettings.FailUrl;
             if (!validationResult.Valid)
             {
-                logger.LogError("Validation in 'HandlePaymentRequestAsync' of 'PayPalService' failed because: {Message}", validationResult.Message);
+                logger.LogError($"Validation in 'HandlePaymentRequestAsync' of '{nameof(XMoneyService)}' failed because: {validationResult.Message}");
                 return new PaymentRequestResult
                 {
                     Successful = false,
@@ -78,7 +81,7 @@ public class XMoneyService(
                 {
                     Successful = false,
                     Action = PaymentRequestActions.Redirect,
-                    ErrorMessage = "No response received from the PayPal",
+                    ErrorMessage = "No response received from the xMoney API.",
                     ActionData = failUrl
                 };
             }
@@ -90,7 +93,7 @@ public class XMoneyService(
                 {
                     Successful = false,
                     Action = PaymentRequestActions.Redirect,
-                    ErrorMessage = "No response received from PayPal.",
+                    ErrorMessage = "No response received from the xMoney API..",
                     ActionData = failUrl
                 };
             }
@@ -105,14 +108,13 @@ public class XMoneyService(
             {
                 Successful = responseSuccessful,
                 Action = PaymentRequestActions.Redirect,
-                ErrorMessage = "No response received from PayPal.",
                 ActionData = (responseSuccessful) ? xMoneyResponse.Data.Attributes.RedirectUrl : xMoneySettings.FailUrl
             };
         }
         catch (Exception exception)
         {
             // Log any exceptions that may have occurred.
-            logger.LogError(exception, "Error handling PayPal payment request");
+            logger.LogError(exception, "Error handling XMoney payment request");
             return new PaymentRequestResult
             {
                 Successful = false,
@@ -173,11 +175,11 @@ public class XMoneyService(
         {
             error = exception.ToString();
             // Log any exceptions that may have occurred.
-            logger.LogError(exception, "Error processing PayPal payment update.");
+            logger.LogError(exception, "Error processing xMoney payment update.");
             return new StatusUpdateResult
             {
                 Successful = false,
-                Status = "Error processing PayPal payment update.",
+                Status = "Error processing xMoney payment update.",
                 StatusCode = 500
             };
         }
@@ -239,49 +241,15 @@ public class XMoneyService(
             throw;
         }
     }
-    
-    private async Task<(XMoneyWebhookModel Model, string webHookResponseBody)> GetXMoneyWebhookModelAsync(bool verifySignature, XMoneySettingsModel? xMoneySettings = null)
-    {
-        using StreamReader reader = new(httpContextAccessor.HttpContext!.Request.Body);
-        var webHookContents = await reader.ReadToEndAsync();
-
-        if (String.IsNullOrWhiteSpace(webHookContents))
-        {
-            throw new Exception("No JSON found in body of XMoney webhook.");
-        }
-        
-        JObject jObject = JObject.Parse(webHookContents);
-
-        if (verifySignature)
-        {
-            if (xMoneySettings is null)
-            {
-                throw new ArgumentNullException(nameof(xMoneySettings), "xMoneySettings cannot be null. If verifySignature is true");
-            }
-            
-            if (!VerifySignature(jObject, xMoneySettings))
-            {
-                throw new Exception("Signature verification failed.");
-            }
-        }
-        
-        var webhookData = jObject.ToObject<XMoneyWebhookModel>();
-        if (webhookData == null)
-        {
-            throw new Exception("Invalid JSON found in body of XMoney webhook.");
-        }
-        
-        return (webhookData, webHookContents);
-    }
 
     /// <inheritdoc />
     public async Task<string> GetInvoiceNumberFromRequestAsync()
     {
         try
         {
-            if (httpContextAccessor.HttpContext?.Request.Body == null)
+            if (httpContextAccessor?.HttpContext?.Request.Body == null)
             {
-                throw new Exception("No HTTP context available.");
+                throw new InvalidOperationException("No HTTP context available.");
             }
 
             var webhookModel = await GetXMoneyWebhookModelAsync(false);
@@ -290,7 +258,7 @@ public class XMoneyService(
             var invoiceId = webhookModel.Model.Resource.Reference;
             if (String.IsNullOrEmpty(invoiceId))
             {
-                throw new Exception("No invoice id found in body of PayPal webhook.");
+                throw new BadHttpRequestException("No invoice id found in body of xMoney webhook.");
             }
             return invoiceId;
         }
@@ -300,6 +268,8 @@ public class XMoneyService(
             throw;
         }
     }
+    
+    #region Helper functions
 
     private RestClient CreateRestClient()
     {
@@ -307,7 +277,7 @@ public class XMoneyService(
         return new RestClient(new RestClientOptions(baseUrl));
     }
     
-    private (bool Valid, string? Message) ValidatePayPalSettings(XMoneySettingsModel xMoneySettings)
+    private (bool Valid, string? Message) ValidateXMoneySettings(XMoneySettingsModel xMoneySettings)
     {
         if (String.IsNullOrEmpty(xMoneySettings.ApiKey) || String.IsNullOrEmpty(xMoneySettings.CallbackUrl))
         {
@@ -322,8 +292,7 @@ public class XMoneyService(
         var basketSettings = await shoppingBasketsService.GetSettingsAsync();
         var totalPrice = await shoppingBasketsService.GetPriceAsync(conceptOrders.FirstOrDefault().Main, conceptOrders.FirstOrDefault().Lines, basketSettings, ShoppingBasket.PriceTypes.PspPriceInVat);
         var subTotaal = await shoppingBasketsService.GetPriceAsync(conceptOrders.FirstOrDefault().Main, conceptOrders.FirstOrDefault().Lines, basketSettings, ShoppingBasket.PriceTypes.ExVatExDiscount);
-        // ToDo
-        //var shipping = await shoppingBasketsService.GetPriceAsync(conceptOrders.FirstOrDefault().Main, conceptOrders.FirstOrDefault().Lines, basketSettings, ShoppingBasket.PriceTypes.);
+        
         var tax = await shoppingBasketsService.GetPriceAsync(conceptOrders.FirstOrDefault().Main, conceptOrders.FirstOrDefault().Lines, basketSettings, ShoppingBasket.PriceTypes.VatOnly);
         var discount = await shoppingBasketsService.GetPriceAsync(conceptOrders.FirstOrDefault().Main, conceptOrders.FirstOrDefault().Lines, basketSettings, ShoppingBasket.PriceTypes.DiscountInVat);
         var hasShippingAddress = !String.IsNullOrWhiteSpace(conceptOrders.FirstOrDefault().Main.GetDetailValue<string>(ConstantsModel.ShippingPostalCode));
@@ -343,23 +312,22 @@ public class XMoneyService(
                          Reference = invoiceNumber,
                          Amount = new AmountModel
                          {
-                             Total = Math.Round(totalPrice, 2).ToString("0.##").Replace(",", ".").Replace(".", "."),
+                             Total = Math.Round(totalPrice, 2).ToString("0.##", CultureInfo.InvariantCulture),
                              Currency = xMoneySettings.Currency,
                              Details = new DetailsModel
                              {
-                                 Subtotal = Math.Round(subTotaal, 2).ToString("0.##").Replace(",", ".").Replace(".", "."),
-                                 Tax = Math.Round(tax, 2).ToString("0.##").Replace(",", ".").Replace(".", "."),
-                                 Discount = Math.Round(discount, 2).ToString("0.##").Replace(",", ".").Replace(".", ".")
+                                 Subtotal = Math.Round(subTotaal, 2).ToString("0.##", CultureInfo.InvariantCulture),
+                                 Tax = Math.Round(tax, 2).ToString("0.##", CultureInfo.InvariantCulture),
+                                 Discount = Math.Round(discount, 2).ToString("0.##", CultureInfo.InvariantCulture)
                              }
                          },
                          ReturnUrls = new ReturnUrlsModel
                          {
-                             
                              ReturnUrl = xMoneySettings.SuccessUrl,
                              CancelUrl = xMoneySettings.FailUrl,
                              CallbackUrl = xMoneySettings.CallbackUrl
                          },
-                         LineItems = new List<LineItemModel>()
+                         LineItems = []
                      },
                      Customer = new CustomerModel
                      {
@@ -388,7 +356,7 @@ public class XMoneyService(
                 var lineItems = new LineItemModel
                 {
                     Name = orderLine.GetDetailValue<string>(ConstantsModel.Title),
-                    Price = price.ToString("0.##").Replace(",", ".").Replace(".", "."),
+                    Price = price.ToString("0.##", CultureInfo.InvariantCulture),
                     Currency = xMoneySettings.Currency,
                     Quantity = quantity
                 };
@@ -400,7 +368,7 @@ public class XMoneyService(
         return restRequest;
     }
 
-    private bool VerifySignature(JObject jsonObject, XMoneySettingsModel xMoneySettings)
+    private static bool VerifySignature(JObject jsonObject, XMoneySettingsModel xMoneySettings)
     {
         var signatureContent = GenerateStringForSignature(jsonObject);
         var signature = GenerateSignature(xMoneySettings.WebhookSecret, signatureContent);
@@ -409,13 +377,13 @@ public class XMoneyService(
 
         if (requestSignature is null)
         {
-            throw new Exception("No signature found");
+            throw new InvalidOperationException("No signature found");
         }
 
         return signature == requestSignature.ToString();
     }
     
-    private string GenerateStringForSignature(JObject jsonObject, string keyPrefix = "")
+    private static string GenerateStringForSignature(JObject jsonObject, string keyPrefix = "")
     {
         var result = new StringBuilder();
         foreach (var jsonProperty in jsonObject.Properties().OrderBy(jp => jp.Name))
@@ -440,7 +408,7 @@ public class XMoneyService(
     private static string GenerateSignature(string webhookSecret, string content, bool asBase64String = false)
     {
         if (String.IsNullOrWhiteSpace(webhookSecret))
-            throw new Exception("No XMoney secret key found in Wiser settings!");
+            throw new InvalidOperationException("No xMoney secret key found in Wiser settings!");
 
         using HMACSHA256 hmac = new HMACSHA256(Encoding.UTF8.GetBytes(webhookSecret));
         var hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(content));
@@ -454,4 +422,43 @@ public class XMoneyService(
 
         return hashString.ToString();
     }
+    
+    private async Task<(XMoneyWebhookModel Model, string webHookResponseBody)> GetXMoneyWebhookModelAsync(bool verifySignature, XMoneySettingsModel? xMoneySettings = null)
+    {
+        if (String.IsNullOrWhiteSpace(webHookContents))
+        {
+            using StreamReader reader = new(httpContextAccessor!.HttpContext!.Request.Body);
+            webHookContents = await reader.ReadToEndAsync();
+            
+            if (String.IsNullOrWhiteSpace(webHookContents))
+            {
+                throw new BadHttpRequestException("No JSON found in body of XMoney webhook.");
+            }
+        }
+        
+        JObject jObject = JObject.Parse(webHookContents);
+
+        if (verifySignature)
+        {
+            if (xMoneySettings is null)
+            {
+                throw new ArgumentNullException(nameof(xMoneySettings), "xMoneySettings cannot be null. If verifySignature is true");
+            }
+            
+            if (!VerifySignature(jObject, xMoneySettings))
+            {
+                throw new BadHttpRequestException("Signature verification failed.");
+            }
+        }
+        
+        var webhookData = jObject.ToObject<XMoneyWebhookModel>();
+        if (webhookData == null)
+        {
+            throw new BadHttpRequestException("Invalid JSON found in body of XMoney webhook.");
+        }
+        
+        return (webhookData, webHookContents);
+    }
+    
+    #endregion
 }
