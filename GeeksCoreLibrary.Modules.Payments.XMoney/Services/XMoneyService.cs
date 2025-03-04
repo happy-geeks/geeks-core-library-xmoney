@@ -50,7 +50,6 @@ public class XMoneyService(
         NullValueHandling = NullValueHandling.Ignore
     };
 
-
     /// <inheritdoc />
     public async Task<PaymentRequestResult> HandlePaymentRequestAsync(ICollection<(WiserItemModel Main, List<WiserItemModel> Lines)> conceptOrders, WiserItemModel userDetails, PaymentMethodSettingsModel paymentMethodSettings, string invoiceNumber)
     {
@@ -370,6 +369,11 @@ public class XMoneyService(
 
     private static bool VerifySignature(JObject jsonObject, XMoneySettingsModel xMoneySettings)
     {
+        if (xMoneySettings.WebhookSecret is null)
+        {
+            throw new InvalidOperationException("No xMoney Webhook secret key found in Wiser settings.");
+        }
+        
         var signatureContent = GenerateStringForSignature(jsonObject);
         var signature = GenerateSignature(xMoneySettings.WebhookSecret, signatureContent);
         
@@ -395,7 +399,8 @@ public class XMoneyService(
 
             if (jsonProperty.Value.Type == JTokenType.Object)
             {
-                result.Append(GenerateStringForSignature((JObject)jsonProperty.Value, $"{keyPrefix}{jsonProperty.Name}"));
+                var childObjectSignature = GenerateStringForSignature((JObject)jsonProperty.Value, $"{keyPrefix}{jsonProperty.Name}");
+                result.Append(childObjectSignature);
             }
             else
             {
@@ -408,17 +413,23 @@ public class XMoneyService(
     private static string GenerateSignature(string webhookSecret, string content, bool asBase64String = false)
     {
         if (String.IsNullOrWhiteSpace(webhookSecret))
+        {
             throw new InvalidOperationException("No xMoney secret key found in Wiser settings!");
+        }
 
-        using HMACSHA256 hmac = new HMACSHA256(Encoding.UTF8.GetBytes(webhookSecret));
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(webhookSecret));
         var hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(content));
 
         if (asBase64String)
+        {
             return Convert.ToBase64String(hashBytes);
+        }
 
-        StringBuilder hashString = new StringBuilder();
+        var hashString = new StringBuilder();
         for (var index = 0; index <= hashBytes.Length - 1; index++)
+        {
             hashString.Append(hashBytes[index].ToString("x2"));
+        }
 
         return hashString.ToString();
     }
@@ -427,7 +438,7 @@ public class XMoneyService(
     {
         if (String.IsNullOrWhiteSpace(webHookContents))
         {
-            using StreamReader reader = new(httpContextAccessor!.HttpContext!.Request.Body);
+            using var reader = new StreamReader(httpContextAccessor!.HttpContext!.Request.Body);
             webHookContents = await reader.ReadToEndAsync();
             
             if (String.IsNullOrWhiteSpace(webHookContents))
@@ -436,7 +447,7 @@ public class XMoneyService(
             }
         }
         
-        JObject jObject = JObject.Parse(webHookContents);
+        var jObject = JObject.Parse(webHookContents);
 
         if (verifySignature)
         {
